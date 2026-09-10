@@ -5,7 +5,7 @@ class GitHubCrawler {
   constructor(model, options = {}) {
     this.model = model;
     this.token = options.token || process.env.GITHUB_TOKEN || null;
-    this.intervalMs = options.intervalMs || 25000;
+    this.intervalMs = options.intervalMs || 15000;
     this.isRunning = false;
     this.timer = null;
     this.targetLanguages = ['javascript', 'python'];
@@ -17,6 +17,17 @@ class GitHubCrawler {
       python: { files: 0, bytes: 0, avgLoss: 0 },
       recentLogs: []
     };
+  }
+
+  log(msg, type = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`[Crawler ${timestamp}] [${type.toUpperCase()}] ${msg}`);
+    this.stats.recentLogs.unshift({
+      time: timestamp,
+      type,
+      message: msg
+    });
+    if (this.stats.recentLogs.length > 25) this.stats.recentLogs.pop();
   }
 
   fetchJson(url) {
@@ -33,8 +44,10 @@ class GitHubCrawler {
         res.on('end', () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+          } else if (res.statusCode === 403) {
+            reject(new Error('Превышен лимит запросов GitHub API (Rate Limit 403).'));
           } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+            reject(new Error(`GitHub API HTTP ${res.statusCode}: ${data.slice(0, 100)}`));
           }
         });
       }).on('error', reject);
@@ -44,26 +57,30 @@ class GitHubCrawler {
   fetchRaw(url) {
     return new Promise((resolve, reject) => {
       https.get(url, { headers: { 'User-Agent': 'Autonomous-Coder-AI' } }, (res) => {
+        if (res.statusCode !== 200) {
+          return resolve(null);
+        }
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => resolve(data));
-      }).on('error', reject);
+      }).on('error', () => resolve(null));
     });
   }
 
   async processCode(rawCode, lang, source = 'manual') {
     if (!rawCode || rawCode.length < 15 || rawCode.length > 25000) {
-      return { success: false, reason: 'Size out of bounds (min 15, max 25000 chars)' };
+      return { success: false, reason: 'Неподходящий размер файла' };
     }
     const lines = rawCode.split('\n');
     if (lines.some(l => l.length > 500)) {
-      return { success: false, reason: 'Contains minified lines' };
+      return { success: false, reason: 'Обнаружен минифицированный код' };
     }
 
     const isValid = SyntaxValidator.validate(rawCode, lang);
     if (!isValid) {
       this.stats.rejectedSyntax++;
-      return { success: false, reason: `Syntax error in ${lang} code` };
+      this.log(`Синтаксическая ошибка в ${source} (${lang}), файл пропущен`, 'warn');
+      return { success: false, reason: `Синтаксическая ошибка в ${lang}` };
     }
 
     const loss = this.model.trainOnCode(rawCode, lang, 25, 4);
@@ -73,56 +90,66 @@ class GitHubCrawler {
     this.stats[langKey].bytes += rawCode.length;
     this.stats[langKey].avgLoss = loss;
 
-    this.stats.recentLogs.unshift({
-      timestamp: new Date().toISOString(),
-      lang,
-      source,
-      bytes: rawCode.length,
-      loss: Number(loss.toFixed(4))
-    });
-    if (this.stats.recentLogs.length > 20) this.stats.recentLogs.pop();
-
+    this.log(`Обучено: ${source} (${lang}, ${rawCode.length} байт). Loss: ${loss.toFixed(4)}`, 'success');
     return { success: true, loss, bytes: rawCode.length };
   }
 
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
+    this.log('Автообучение запущено. Начинаем поиск репозиториев...');
 
-    const loop = async () => {
+    const step = async () => {
       if (!this.isRunning) return;
       const lang = this.targetLanguages[this.currentLangIndex];
       this.currentLangIndex = (this.currentLangIndex + 1) % this.targetLanguages.length;
 
       try {
-        const query = `language:${lang} stars:>200`;
+        this.log(`Поиск репозиториев на ${lang}...`);
+        const query = `language:${lang} stars:>500`;
         const searchUrl = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=updated&per_page=5`;
         const res = await this.fetchJson(searchUrl);
 
         if (res.items && res.items.length > 0) {
           const repo = res.items[Math.floor(Math.random() * res.items.length)];
           const branch = repo.default_branch || 'main';
-          const fileToTry = lang === 'python' ? 'main.py' : 'index.js';
-          const rawUrl = `https://raw.githubusercontent.com/${repo.full_name}/${branch}/${fileToTry}`;
-          const code = await this.fetchRaw(rawUrl);
-          await this.processCode(code, lang, `${repo.full_name}/${fileToTry}`);
+
+          // Получаем реальное дерево файлов репозитория
+          const treeUrl = `https://api.github.com/repos/${repo.full_name}/git/trees/${branch}?recursive=1`;
+          const treeData = await this.fetchJson(treeUrl);
+
+          const ext = lang === 'python' ? '.py' : '.js';
+          const candidates = (treeData.tree || [])
+            .filter(item => item.type === 'blob' && item.path.endsWith(ext) && !item.path.includes('min.') && !item.path.includes('test'));
+
+          if (candidates.length > 0) {
+            const chosenFile = candidates[Math.floor(Math.random() * candidates.length)].path;
+            this.log(`Загрузка файла: ${repo.full_name}/${chosenFile}`);
+            const rawUrl = `https://raw.githubusercontent.com/${repo.full_name}/${branch}/${chosenFile}`;
+            const code = await this.fetchRaw(rawUrl);
+            if (code) {
+              await this.processCode(code, lang, `${repo.full_name}/${chosenFile}`);
+            }
+          } else {
+            this.log(`В репозитории ${repo.full_name} не найдены подходящие ${ext} файлы`, 'warn');
+          }
         }
       } catch (err) {
-        this.stats.recentLogs.unshift({ timestamp: new Date().toISOString(), error: err.message });
-        if (this.stats.recentLogs.length > 20) this.stats.recentLogs.pop();
+        this.log(`Ошибка: ${err.message}`, 'error');
       }
 
       if (this.isRunning) {
-        this.timer = setTimeout(loop, this.intervalMs);
+        this.timer = setTimeout(step, this.intervalMs);
       }
     };
 
-    loop();
+    step();
   }
 
   stop() {
     this.isRunning = false;
     if (this.timer) clearTimeout(this.timer);
+    this.log('Автообучение остановлено.');
   }
 }
 

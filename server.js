@@ -5,6 +5,7 @@ const { GitHubCrawler } = require('./github-crawler.js');
 const PORT = process.env.PORT || 3000;
 const model = new CoderModel({ hiddenSize: 64, lr: 0.02 });
 
+// Первичная инициализация
 const initialCorpus = `
 function add(a, b) { return a + b; }
 const multiply = (x, y) => x * y;
@@ -16,7 +17,7 @@ model.trainOnCode("const add = (a, b) => a + b;\n", "js", 20, 10);
 model.trainOnCode("def add(a, b):\n    return a + b\n", "py", 20, 10);
 
 const crawler = new GitHubCrawler(model, {
-  intervalMs: Number(process.env.INTERVAL_MS) || 20000,
+  intervalMs: Number(process.env.INTERVAL_MS) || 15000,
   token: process.env.GITHUB_TOKEN || null
 });
 
@@ -40,7 +41,7 @@ function getDashboardHtml() {
   <title>Autonomous Coder AI</title>
   <style>
     :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; }
-    body { max-width: 850px; margin: 0 auto; padding: 24px; }
+    body { max-width: 900px; margin: 0 auto; padding: 24px; }
     .card { background: #1e293b; border-radius: 8px; padding: 18px; margin-bottom: 16px; border: 1px solid #334155; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
     .stat { background: #0f172a; padding: 12px; border-radius: 6px; text-align: center; }
@@ -53,6 +54,11 @@ function getDashboardHtml() {
     .row { display: flex; gap: 8px; margin-bottom: 8px; }
     .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; background: #334155; }
     .badge-on { background: #166534; color: #bbf7d0; }
+    .log-box { background: #0b1120; border: 1px solid #334155; border-radius: 6px; padding: 10px; height: 160px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+    .log-info { color: #94a3b8; }
+    .log-success { color: #4ade80; }
+    .log-warn { color: #facc15; }
+    .log-error { color: #f87171; }
   </style>
 </head>
 <body>
@@ -66,12 +72,17 @@ function getDashboardHtml() {
       <div class="stat"><div class="stat-val" id="stat-vocab">0</div><div class="stat-lbl">Словарь</div></div>
       <div class="stat"><div class="stat-val" id="stat-steps">0</div><div class="stat-lbl">Шаги обучения</div></div>
       <div class="stat"><div class="stat-val" id="stat-loss">0.00</div><div class="stat-lbl">Последний Loss</div></div>
-      <div class="stat"><div class="stat-val" id="stat-files">0</div><div class="stat-lbl">Файлов GitHub</div></div>
+      <div class="stat"><div class="stat-val" id="stat-files">0</div><div class="stat-lbl">Обучено файлов</div></div>
     </div>
     <div class="row" style="margin-top: 12px;">
       <button onclick="toggleCrawler(true)" style="background: #16a34a;">Старт автообучения GitHub</button>
       <button onclick="toggleCrawler(false)" style="background: #dc2626;">Стоп</button>
     </div>
+  </div>
+
+  <div class="card">
+    <h4>Лог работы краулера</h4>
+    <div id="log-box" class="log-box">Ожидание событий...</div>
   </div>
 
   <div class="card">
@@ -109,9 +120,17 @@ function getDashboardHtml() {
         document.getElementById('stat-steps').innerText = data.model.totalSteps;
         document.getElementById('stat-loss').innerText = Number(data.model.recentLoss).toFixed(3);
         document.getElementById('stat-files').innerText = data.crawler.totalProcessed;
+        
         const b = document.getElementById('crawler-badge');
         b.className = 'badge ' + (data.crawler.isRunning ? 'badge-on' : '');
         b.innerText = data.crawler.isRunning ? 'Обучение GitHub: активно' : 'Обучение GitHub: выключено';
+
+        const logs = data.crawler.recentLogs || [];
+        if (logs.length > 0) {
+          document.getElementById('log-box').innerHTML = logs.map(l => 
+            \`<div class="log-\${l.type || 'info'}">[\${l.time}] \${l.message}</div>\`
+          ).join('');
+        }
       } catch (e) {}
     }
     async function generateCode() {
@@ -136,7 +155,7 @@ function getDashboardHtml() {
         body: JSON.stringify({ lang, code })
       });
       const data = await res.json();
-      msg.innerText = data.success ? ('Успешно, Loss: ' + Number(data.loss).toFixed(4)) : ('Ошибка: ' + (data.reason || data.error));
+      msg.innerText = data.success ? ('Успешно! Loss: ' + Number(data.loss).toFixed(4)) : ('Ошибка: ' + (data.reason || data.error));
       msg.style.color = data.success ? '#4ade80' : '#f87171';
       update();
     }
@@ -144,7 +163,7 @@ function getDashboardHtml() {
       await fetch('/api/crawler/' + (start ? 'start' : 'stop'), { method: 'POST' });
       update();
     }
-    setInterval(update, 3000);
+    setInterval(update, 2500);
     update();
   </script>
 </body>
