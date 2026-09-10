@@ -1,3 +1,5 @@
+const fs = require('fs');
+
 class CoderModel {
   constructor(options = {}) {
     this.hiddenSize = options.hiddenSize || 64;
@@ -20,6 +22,70 @@ class CoderModel {
     this.mWhy = null;
     this.mbh = null;
     this.mby = null;
+  }
+
+  saveToFile(filePath = './model_checkpoint.json') {
+    if (!this.Wxh) return false;
+    try {
+      const data = {
+        hiddenSize: this.hiddenSize,
+        lr: this.lr,
+        vocab: this.vocab,
+        charToIdx: this.charToIdx,
+        idxToChar: this.idxToChar,
+        vocabSize: this.vocabSize,
+        totalSteps: this.totalSteps,
+        recentLoss: this.recentLoss,
+        Wxh: this.Wxh.map(row => Array.from(row)),
+        Whh: this.Whh.map(row => Array.from(row)),
+        Why: this.Why.map(row => Array.from(row)),
+        bh: Array.from(this.bh),
+        by: Array.from(this.by),
+        mWxh: this.mWxh.map(row => Array.from(row)),
+        mWhh: this.mWhh.map(row => Array.from(row)),
+        mWhy: this.mWhy.map(row => Array.from(row)),
+        mbh: Array.from(this.mbh),
+        mby: Array.from(this.mby)
+      };
+      fs.writeFileSync(filePath, JSON.stringify(data));
+      console.log(`[Model] Чекпоинт сохранен: ${filePath} (шагов: ${this.totalSteps})`);
+      return true;
+    } catch (err) {
+      console.error('[Model] Ошибка сохранения чекпоинта:', err.message);
+      return false;
+    }
+  }
+
+  loadFromFile(filePath = './model_checkpoint.json') {
+    if (!fs.existsSync(filePath)) return false;
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      this.hiddenSize = data.hiddenSize;
+      this.lr = data.lr;
+      this.vocab = data.vocab;
+      this.charToIdx = data.charToIdx;
+      this.idxToChar = data.idxToChar;
+      this.vocabSize = data.vocabSize;
+      this.totalSteps = data.totalSteps;
+      this.recentLoss = data.recentLoss;
+
+      this.Wxh = data.Wxh.map(row => new Float64Array(row));
+      this.Whh = data.Whh.map(row => new Float64Array(row));
+      this.Why = data.Why.map(row => new Float64Array(row));
+      this.bh = new Float64Array(data.bh);
+      this.by = new Float64Array(data.by);
+
+      this.mWxh = data.mWxh.map(row => new Float64Array(row));
+      this.mWhh = data.mWhh.map(row => new Float64Array(row));
+      this.mWhy = data.mWhy.map(row => new Float64Array(row));
+      this.mbh = new Float64Array(data.mbh);
+      this.mby = new Float64Array(data.mby);
+      console.log(`[Model] Чекпоинт загружен: ${filePath} (шагов: ${this.totalSteps}, словарь: ${this.vocabSize})`);
+      return true;
+    } catch (err) {
+      console.error('[Model] Ошибка загрузки чекпоинта:', err.message);
+      return false;
+    }
   }
 
   initVocab(seedCorpus) {

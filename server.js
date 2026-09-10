@@ -5,20 +5,30 @@ const { GitHubCrawler } = require('./github-crawler.js');
 const PORT = process.env.PORT || 3000;
 const model = new CoderModel({ hiddenSize: 64, lr: 0.02 });
 
-// Первичная инициализация
-const initialCorpus = `
+// Пытаемся восстановить модель из файла
+const loaded = model.loadFromFile('./model_checkpoint.json');
+if (!loaded) {
+  const initialCorpus = `
 function add(a, b) { return a + b; }
 const multiply = (x, y) => x * y;
 def calculate(x, y):
     return x + y
 `;
-model.initVocab(initialCorpus);
-model.trainOnCode("const add = (a, b) => a + b;\n", "js", 20, 10);
-model.trainOnCode("def add(a, b):\n    return a + b\n", "py", 20, 10);
+  model.initVocab(initialCorpus);
+  model.trainOnCode("const add = (a, b) => a + b;\n", "js", 20, 10);
+  model.trainOnCode("def add(a, b):\n    return a + b\n", "py", 20, 10);
+}
 
 const crawler = new GitHubCrawler(model, {
   intervalMs: Number(process.env.INTERVAL_MS) || 15000,
   token: process.env.GITHUB_TOKEN || null
+});
+
+// Сохранение при корректном завершении процесса
+process.on('SIGINT', () => {
+  console.log('\n[Server] Завершение работы, сохраняем чекпоинт...');
+  model.saveToFile();
+  process.exit(0);
 });
 
 function parseJson(req) {
@@ -77,6 +87,7 @@ function getDashboardHtml() {
     <div class="row" style="margin-top: 12px;">
       <button onclick="toggleCrawler(true)" style="background: #16a34a;">Старт автообучения GitHub</button>
       <button onclick="toggleCrawler(false)" style="background: #dc2626;">Стоп</button>
+      <button onclick="saveCheckpoint()" style="background: #475569;">💾 Сохранить чекпоинт</button>
     </div>
   </div>
 
@@ -163,6 +174,11 @@ function getDashboardHtml() {
       await fetch('/api/crawler/' + (start ? 'start' : 'stop'), { method: 'POST' });
       update();
     }
+    async function saveCheckpoint() {
+      await fetch('/api/checkpoint/save', { method: 'POST' });
+      alert('Чекпоинт успешно сохранен на диск!');
+      update();
+    }
     setInterval(update, 2500);
     update();
   </script>
@@ -214,6 +230,10 @@ const server = http.createServer(async (req, res) => {
       if (!body.code) return send(400, { error: 'Поле code обязательно' });
       const result = await crawler.processCode(body.code, body.lang || 'python', 'manual');
       return send(200, result);
+    }
+    if (req.method === 'POST' && pathname === '/api/checkpoint/save') {
+      const ok = model.saveToFile();
+      return send(200, { success: ok });
     }
     if (req.method === 'POST' && pathname === '/api/crawler/start') {
       crawler.start();

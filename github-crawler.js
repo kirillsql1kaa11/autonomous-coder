@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const https = require('https');
 const { SyntaxValidator } = require('./syntax-validator.js');
 
@@ -10,6 +12,9 @@ class GitHubCrawler {
     this.timer = null;
     this.targetLanguages = ['javascript', 'python'];
     this.currentLangIndex = 0;
+    this.datasetDir = path.join(process.cwd(), 'dataset');
+    if (!fs.existsSync(this.datasetDir)) fs.mkdirSync(this.datasetDir, { recursive: true });
+
     this.stats = {
       totalProcessed: 0,
       rejectedSyntax: 0,
@@ -22,11 +27,7 @@ class GitHubCrawler {
   log(msg, type = 'info') {
     const timestamp = new Date().toLocaleTimeString();
     console.log(`[Crawler ${timestamp}] [${type.toUpperCase()}] ${msg}`);
-    this.stats.recentLogs.unshift({
-      time: timestamp,
-      type,
-      message: msg
-    });
+    this.stats.recentLogs.unshift({ time: timestamp, type, message: msg });
     if (this.stats.recentLogs.length > 25) this.stats.recentLogs.pop();
   }
 
@@ -57,9 +58,7 @@ class GitHubCrawler {
   fetchRaw(url) {
     return new Promise((resolve, reject) => {
       https.get(url, { headers: { 'User-Agent': 'Autonomous-Coder-AI' } }, (res) => {
-        if (res.statusCode !== 200) {
-          return resolve(null);
-        }
+        if (res.statusCode !== 200) return resolve(null);
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => resolve(data));
@@ -83,12 +82,23 @@ class GitHubCrawler {
       return { success: false, reason: `Синтаксическая ошибка в ${lang}` };
     }
 
+    // Сохраняем файл в папку dataset/
+    try {
+      const safeName = source.replace(/[\/\\:]/g, '_');
+      const langDir = path.join(this.datasetDir, lang);
+      if (!fs.existsSync(langDir)) fs.mkdirSync(langDir, { recursive: true });
+      fs.writeFileSync(path.join(langDir, safeName), rawCode);
+    } catch (e) {}
+
     const loss = this.model.trainOnCode(rawCode, lang, 25, 4);
     const langKey = lang.startsWith('py') ? 'python' : 'javascript';
     this.stats.totalProcessed++;
     this.stats[langKey].files++;
     this.stats[langKey].bytes += rawCode.length;
     this.stats[langKey].avgLoss = loss;
+
+    // Автосохранение чекпоинта
+    this.model.saveToFile();
 
     this.log(`Обучено: ${source} (${lang}, ${rawCode.length} байт). Loss: ${loss.toFixed(4)}`, 'success');
     return { success: true, loss, bytes: rawCode.length };
@@ -114,7 +124,6 @@ class GitHubCrawler {
           const repo = res.items[Math.floor(Math.random() * res.items.length)];
           const branch = repo.default_branch || 'main';
 
-          // Получаем реальное дерево файлов репозитория
           const treeUrl = `https://api.github.com/repos/${repo.full_name}/git/trees/${branch}?recursive=1`;
           const treeData = await this.fetchJson(treeUrl);
 
@@ -149,7 +158,8 @@ class GitHubCrawler {
   stop() {
     this.isRunning = false;
     if (this.timer) clearTimeout(this.timer);
-    this.log('Автообучение остановлено.');
+    this.model.saveToFile();
+    this.log('Автообучение остановлено. Чекпоинт сохранен.');
   }
 }
 
